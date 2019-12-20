@@ -28,7 +28,7 @@ const runJob = (url, IS_PRODUCTION) => {
                     '&--disable-gpu=true'
             }) :
             await puppeteer.launch({
-                headless: false,
+                headless: true,
                 args: [
                     (proxy != '' ? '--proxy-server=' + proxy : ''),
                     '--no-sandbox',
@@ -103,8 +103,6 @@ const runJob = (url, IS_PRODUCTION) => {
                 resolve(html)
             }
             else {
-                await page.goto('https://bot.sannysoft.com')
-                await page.waitFor(50000)
                 reject('Status Code: ' + response._status)
             }
 
