@@ -8,6 +8,8 @@ const app = module.exports = new Koa()
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production'
 const secretAPIKey = '1234' //secret api key
+const maxThreads = 5
+let activeThreads = 0
 
 app.use(koaBody())
 
@@ -33,12 +35,21 @@ async function userRequest(ctx) {
         ctx.body = 'api-key header required for authentication'
     }
     else if (apiKey == secretAPIKey) {
-        if (url) {
+        console.log(activeThreads, url)
+        if (activeThreads >= maxThreads) {
+            ctx.status = 503
+            ctx.body = 'Max allowed threads exceeding, wait for previous jobs to complete'
+        }
+        else if (url) {
             try {
+                activeThreads++
                 let response = await runJob(url, IS_PRODUCTION)
                 ctx.body = response
             } catch (error) {
                 ctx.body = error
+            }
+            finally {
+                activeThreads--
             }
         }
         else {

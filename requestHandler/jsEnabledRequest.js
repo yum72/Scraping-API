@@ -93,7 +93,7 @@ const runJob = (url, IS_PRODUCTION) => {
             // })
 
             const response = await page.goto(url, {
-                timeout: 25000,
+                timeout: 55000,
                 waitUntil: 'networkidle2',
             })
 
