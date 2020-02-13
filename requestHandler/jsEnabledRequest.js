@@ -30,7 +30,7 @@ const runJob = (url, IS_PRODUCTION) => {
             await puppeteer.launch({
                 headless: true,
                 args: [
-                    (proxy != '' ? '--proxy-server=' + proxy : ''),
+                    (proxy != '' ? '--proxy-server=' + 'http://' + proxy.replace('http://', '') : ''),
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
@@ -92,21 +92,32 @@ const runJob = (url, IS_PRODUCTION) => {
             //     }
             // })
 
-            const response = await page.goto(url, {
+            let response = await page.goto(url, {
                 timeout: 55000,
-                waitUntil: 'networkidle2',
+                waitUntil: 'networkidle0',
             })
+
+            await page.waitFor(2000)
+
+            if (response === null) {
+                console.log("Got null, trying wait.");
+                response = await page.waitForResponse(() => true)
+            }
 
             if (response._status < 400) {
                 await page.waitFor(1000)
                 let html = await page.content()
                 resolve(html)
             }
-            else {
+            else if (response && response._status) {
                 reject('Status Code: ' + response._status)
+            }
+            else {
+                reject('Failed to visit')
             }
 
         } catch (error) {
+            console.log(error)
             reject(error)
         } finally {
             if (browser) {

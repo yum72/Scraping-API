@@ -6,6 +6,7 @@
     "puppeteer": "^2.0.0",
     "puppeteer-extra": "^3.1.7",
     "puppeteer-extra-plugin-stealth": "^2.4.5",
+    "request": "^2.88.0",
     "user-agents": "^1.0.476"
   }
 }

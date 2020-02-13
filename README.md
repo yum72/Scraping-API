@@ -7,9 +7,9 @@ Nodejs API to handle scraping requests using request/cheerio and puppeteer
 
 - Handle Routes //done
 
-- Handle simple requests
+- Handle simple requests //done
 
-- Handle js based sites <-
+- Handle js based sites //done
     -- browserless option
     
 - Use Docker
