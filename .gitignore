@@ -1,5 +1,9 @@
 node_modules
-build
-npm-debug.log
 .env
+
+# cloakbrowser caches its Chromium build here
+.cache/
+chrome-profile/
+
+npm-debug.log*
 .DS_Store
