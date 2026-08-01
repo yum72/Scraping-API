@@ -1,0 +1,38 @@
+{
+  "name": "scraping-api",
+  "version": "2.0.0",
+  "description": "HTTP API that fetches pages, routing each request through plain fetch or a stealth browser depending on what the target needs.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "scraping",
+    "web-scraping",
+    "fastify",
+    "cloakbrowser",
+    "playwright",
+    "nodejs",
+    "api"
+  ],
+  "author": "Hamza Rahman",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yum72/Scraping-API.git"
+  },
+  "homepage": "https://github.com/yum72/Scraping-API#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "cloakbrowser": "^0.5.3",
+    "fastify": "^5.2.0",
+    "p-limit": "^6.2.0",
+    "playwright-core": "^1.49.1",
+    "user-agents": "^1.1.400"
+  }
+}
