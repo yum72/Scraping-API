@@ -1,8 +1,8 @@
 import Fastify from 'fastify';
-import pLimit from 'p-limit';
-import { fetchPlain } from './handlers/plain.js';
-import { fetchWithBrowser } from './handlers/browser.js';
-import { proxyCount } from './lib/proxies.js';
+import PQueue from 'p-queue';
+import { fetchPlain, closeProxyAgents } from './handlers/plain.js';
+import { fetchWithBrowser, liveBrowserCount, closeAllBrowsers } from './handlers/browser.js';
+import { proxyCount, proxySummary } from './lib/proxies.js';
 
 /**
  * Builds the Fastify app.
@@ -13,24 +13,37 @@ import { proxyCount } from './lib/proxies.js';
  * @param {Object} [options]
  * @param {string} options.apiKey - Required. Requests must present it as api-key.
  * @param {number} [options.maxConcurrent=15] - Browser jobs allowed at once.
+ * @param {number} [options.queueTimeout=180000] - Ceiling on a queued browser
+ *   job, counted from when it starts running.
  * @param {Object} [options.logger] - Fastify logger option.
  * @returns {import('fastify').FastifyInstance}
  */
-export const buildApp = ({ apiKey, maxConcurrent = 15, logger = false } = {}) => {
+export const buildApp = ({
+  apiKey,
+  maxConcurrent = 15,
+  queueTimeout = 180_000,
+  logger = false
+} = {}) => {
   if (!apiKey) {
     throw new Error('apiKey is required');
   }
 
   const app = Fastify({ logger });
 
-  // Only the browser path is limited. Plain fetches are cheap enough that the
+  // Only the browser path is queued. Plain fetches are cheap enough that the
   // event loop is the only meaningful constraint, but each browser job costs a
-  // Chromium process and a few hundred MB, so they queue.
+  // Chromium process and a few hundred MB.
   //
-  // The previous version incremented a counter and rejected past the limit,
-  // which both leaked on throw and turned load into errors. p-limit queues
-  // instead, so callers wait rather than fail.
-  const limit = pLimit(maxConcurrent);
+  // p-queue rather than a bare concurrency limiter: it carries a per-job
+  // timeout, and it reports size and pending, which is what makes the queue
+  // depth on /health real rather than a guess. The 2020 version incremented a
+  // counter and returned 503 past 15, which turned load into errors and leaked
+  // the count whenever a job threw.
+  const queue = new PQueue({
+    concurrency: maxConcurrent,
+    timeout: queueTimeout,
+    throwOnTimeout: true
+  });
 
   app.addHook('onRequest', async (request, reply) => {
     if (request.url === '/health') return;
@@ -46,8 +59,15 @@ export const buildApp = ({ apiKey, maxConcurrent = 15, logger = false } = {}) =>
 
   app.get('/health', async () => ({
     status: 'ok',
-    proxies: proxyCount(),
-    browserSlots: { max: maxConcurrent, queued: limit.pendingCount, active: limit.activeCount }
+    proxies: proxySummary(),
+    browser: {
+      max: maxConcurrent,
+      running: queue.pending,
+      queued: queue.size,
+      // Live Chromium processes. This should track "running"; a number that
+      // stays above it is the signal that browsers are being leaked.
+      processes: liveBrowserCount()
+    }
   }));
 
   app.get('/scrape', {
@@ -79,18 +99,38 @@ export const buildApp = ({ apiKey, maxConcurrent = 15, logger = false } = {}) =>
 
     try {
       const result = js
-        ? await limit(() => fetchWithBrowser(url, options))
+        ? await queue.add(() => fetchWithBrowser(url, options), { throwOnTimeout: true })
         : await fetchPlain(url, options);
 
       return { ...result, engine: js ? 'browser' : 'fetch' };
     } catch (error) {
-      const status = error.status && error.status >= 400 ? 502 : 500;
+      // A timeout is ours, not the target's, so it maps to 504 rather than 502.
+      const status = error.status === 504 || error.name === 'TimeoutError'
+        ? 504
+        : error.status && error.status >= 400
+          ? 502
+          : 500;
       request.log?.error({ err: error, url }, 'scrape failed');
       return reply.code(status).send({
-        error: error.message,
-        upstreamStatus: error.status ?? null
+        // Playwright errors carry ANSI colour codes and a multi-line call log,
+        // which is useful in a terminal and noise in a JSON response body.
+        error: String(error.message)
+          .replace(/\u001b\[[0-9;]*m/g, '')
+          .split('\nCall log:')[0]
+          .trim(),
+        upstreamStatus: error.status >= 400 && error.status !== 504 ? error.status : null
       });
     }
+  });
+
+  // Reap any browser still running when the server closes, so a restart or a
+  // crashed deploy does not leave Chromium processes holding memory.
+  app.addHook('onClose', async () => {
+    queue.pause();
+    queue.clear();
+    const closed = await closeAllBrowsers();
+    if (closed > 0) app.log?.info(`closed ${closed} browser(s) on shutdown`);
+    await closeProxyAgents();
   });
 
   return app;

@@ -15,12 +15,33 @@ if (!apiKey) {
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? '0.0.0.0';
 const maxConcurrent = Number(process.env.MAX_CONCURRENT_BROWSERS ?? 15);
+const queueTimeout = Number(process.env.BROWSER_JOB_TIMEOUT_MS ?? 180_000);
 
-const app = buildApp({ apiKey, maxConcurrent, logger: true });
+const app = buildApp({ apiKey, maxConcurrent, queueTimeout, logger: true });
+
+let shuttingDown = false;
 
 const shutdown = async (signal) => {
+  // A second Ctrl-C should not start a parallel teardown while the first is
+  // still reaping browsers.
+  if (shuttingDown) return;
+  shuttingDown = true;
+
   app.log.info(`${signal} received, closing`);
-  await app.close();
+
+  // Don't hang forever if a browser refuses to die. app.close() runs the
+  // onClose hook that reaps them, but this is the backstop.
+  const forceExit = setTimeout(() => {
+    app.log.error('shutdown timed out, exiting anyway');
+    process.exit(1);
+  }, 20_000);
+  forceExit.unref();
+
+  try {
+    await app.close();
+  } catch (error) {
+    app.log.error(error, 'error during shutdown');
+  }
   process.exit(0);
 };
 
