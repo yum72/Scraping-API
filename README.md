@@ -60,6 +60,7 @@ Responses:
 | 400 | `url` missing, unparseable, or not http/https. |
 | 401 | `api-key` missing or wrong. |
 | 502 | The target site answered with an error. `upstreamStatus` has its code. |
+| 504 | Our timeout, not the target's. The job was killed. |
 | 500 | The request failed before a response, for example DNS or connection refused. |
 
 ### `GET /health`
@@ -80,11 +81,56 @@ Environment variables, all listed in `.env.example`:
 | `API_KEY` | none | Required. The server exits rather than start without it. |
 | `PORT` | 3000 | |
 | `HOST` | 0.0.0.0 | |
-| `MAX_CONCURRENT_BROWSERS` | 15 | Browser jobs allowed at once. Requests past it queue rather than fail. |
-| `PROXIES` | empty | Comma or newline separated. `http://user:pass@host:port`, or `host:port`. Empty means connect directly. |
+| `MAX_CONCURRENT_BROWSERS` | 15 | Browser jobs running at once. See Queue. |
+| `BROWSER_JOB_TIMEOUT_MS` | 180000 | Ceiling on one browser job. See Queue. |
+| `PROXIES_FILE` | empty | Path to a proxy list. See Proxies. |
+| `PROXIES` | empty | Inline proxy list. See Proxies. |
 
-Proxies live in the environment, not in a committed file. A random one is picked
-per request when the pool is non-empty.
+## Proxies
+
+Drop in a list and go. Nothing else to configure.
+
+```bash
+PROXIES_FILE=./proxies.txt API_KEY=$API_KEY npm start
+```
+
+```
+# proxies.txt — one per line
+203.0.113.10:8080
+user:pass@203.0.113.11:8080
+http://203.0.113.12:3128
+socks5://203.0.113.13:1080
+
+# commented out for now, kept for later
+# 203.0.113.99:8080
+```
+
+A bare `host:port` is assumed to be http. Credentials can be inline. Blank lines
+and `#` comments are skipped, so entries can be disabled without deleting them.
+For one or two proxies the inline form is fine:
+
+```bash
+PROXIES="203.0.113.10:8080,203.0.113.11:8080"
+```
+
+Both apply to both engines: plain fetches go through an undici `ProxyAgent`, and
+the browser gets the proxy at launch.
+
+Selection is round-robin, not random. Random distributes unevenly over a short
+run, which on a small pool means one proxy takes several requests in a row and
+gets rate limited while another sits idle. One `ProxyAgent` is kept per proxy and
+reused, so connections stay pooled instead of being rebuilt per request.
+
+`/health` reports what loaded, with credentials stripped, which is the quick way
+to confirm a list was picked up:
+
+```json
+{ "count": 4, "source": "PROXIES_FILE", "hosts": ["http://203.0.113.10:8080", "..."] }
+```
+
+A `PROXIES_FILE` that cannot be read is a startup error rather than a warning.
+Silently continuing would send every request from the server's own IP, which is
+the thing the pool existed to prevent.
 
 ## Why cloakbrowser
 
@@ -116,29 +162,86 @@ API_KEY=$(openssl rand -hex 24) docker compose up --build
 ## Tests
 
 ```bash
-npm test
+npm test           # fast, no network, no browser
+npm run test:browser   # launches a real Chromium, ~20s
+npm run test:all
 ```
 
-Covers auth, parameter validation and the URL scheme guard. They run through
-`app.inject()` with no port bound and make no network calls, so they are fast and
-work offline. The engines themselves are not unit tested, since what they do is
-talk to the internet.
+`npm test` covers auth, parameter validation and the URL scheme guard. It runs
+through `app.inject()` with no port bound and makes no network calls, so it is
+fast and works offline.
 
-## Concurrency
+`npm run test:browser` is separate because it starts real browsers. It is the
+suite that guards against process leaks, so it is worth running before a deploy
+even though it is slower.
 
-Only the browser path is limited. Plain fetches are cheap enough that the event
+## Queue
+
+Only the browser path is queued. Plain fetches are cheap enough that the event
 loop is the constraint, but each browser job is a Chromium process and a few
-hundred MB, so they go through a queue.
+hundred MB.
 
-Requests past the limit wait rather than fail. An earlier version returned 503
-once a counter passed 15, which turned load into errors and leaked the counter
-whenever a job threw.
+The queue is [p-queue](https://github.com/sindresorhus/p-queue), with
+`concurrency` from `MAX_CONCURRENT_BROWSERS` and a per-job `timeout` from
+`BROWSER_JOB_TIMEOUT_MS`.
+
+| Behaviour | |
+|---|---|
+| Past the concurrency limit | Requests wait in the queue. They are not rejected. |
+| Job exceeds its timeout | The browser is killed and the request gets 504. |
+| Server shuts down | The queue is paused and cleared, and running browsers are reaped. |
+
+The 2020 version incremented a counter and returned 503 once it passed 15, which
+turned load into errors and leaked the count whenever a job threw. p-queue also
+reports `size` and `pending`, which is what makes the numbers on `/health` real
+rather than an estimate.
+
+`/health` is the thing to watch:
+
+```json
+{
+  "browser": { "max": 15, "running": 4, "queued": 2, "processes": 4 }
+}
+```
+
+`processes` counts live Chromium sessions. It should track `running`. A
+`processes` count that stays above `running` means browsers are being leaked, and
+that is the number to alert on.
+
+## Browser lifecycle
+
+Browsers that hang and are never cleaned up are the way a scraping service ends
+up slowly eating memory, so termination is guaranteed rather than hoped for.
+
+Chromium is started through `chromium.launchServer` rather than cloakbrowser's
+`launch()` helper. That is deliberate: Playwright's `Browser` object has no
+`.process()`, so a browser that stops responding cannot be killed through it.
+`launchServer` returns a real PID, which means SIGKILL is always available.
+
+Every job is bounded twice. `page.goto` has its own navigation timeout, and the
+whole job additionally runs against a deadline, because a page can get past
+navigation and then wedge in `content()` where nothing else would ever give up.
+When the deadline passes the process is killed, which is what makes the pending
+page calls reject instead of sitting there holding Chromium open.
+
+Teardown is bounded too. `close()` is tried first so pages can flush, but it is
+raced against a five-second timer and followed by SIGKILL either way, because
+`close()` can itself hang on a wedged browser and awaiting it unbounded is
+precisely what leaves the process alive.
+
+Every running browser is tracked, so `SIGTERM` and `SIGINT` reap whatever is
+in flight rather than orphaning it. Shutdown has its own 20-second backstop that
+exits regardless.
+
+`npm run test:browser` covers all of it against a real Chromium: normal
+completion, navigation timeout, the hard deadline, and shutdown with a job still
+running. Each asserts that the process count does not grow.
 
 ## History
 
 Rewritten in 2026. It was originally a 2020 Koa app on `request` and Puppeteer
 2.0.0, with the API key hardcoded as `1234`. The current version is Fastify on
-native `fetch` and cloakbrowser, with the key required from the environment.
+undici and cloakbrowser, with the key required from the environment.
 
 ## License
 
