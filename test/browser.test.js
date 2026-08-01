@@ -55,7 +55,10 @@ describe('browser lifecycle', { concurrency: 1 }, () => {
   test('releases the browser after a successful fetch', async () => {
     const before = chromeProcesses();
 
-    const result = await fetchWithBrowser(`${baseUrl}/`, { timeout: 30_000 });
+    const result = await fetchWithBrowser(`${baseUrl}/`, {
+      timeout: 30_000,
+      deadlineAt: Date.now() + 60_000
+    });
 
     assert.equal(result.status, 200);
     assert.match(result.html, /<h1>ok<\/h1>/);
@@ -73,8 +76,8 @@ describe('browser lifecycle', { concurrency: 1 }, () => {
     const before = chromeProcesses();
 
     await assert.rejects(
-      () => fetchWithBrowser(`${baseUrl}/hang`, { timeout: 3000 }),
-      /Timeout|exceeded/
+      () => fetchWithBrowser(`${baseUrl}/hang`, { timeout: 3000, deadlineAt: Date.now() + 60_000 }),
+      /Timeout|Timed out/
     );
 
     assert.equal(liveBrowserCount(), 0, 'session should be released on timeout');
@@ -89,19 +92,20 @@ describe('browser lifecycle', { concurrency: 1 }, () => {
   test('kills the browser when the hard deadline passes', async () => {
     const before = chromeProcesses();
 
-    // hardTimeout below the navigation timeout, so the deadline is what fires.
-    // This is the backstop for a page that gets past goto and then wedges,
-    // where nothing else would ever give up.
+    // Budget below the navigation timeout, so the deadline is what fires. This
+    // is the backstop for a page that gets past goto and then wedges, where
+    // nothing else would ever give up.
     const error = await fetchWithBrowser(`${baseUrl}/hang`, {
       timeout: 60_000,
-      hardTimeout: 2000
+      budget: 2000,
+      deadlineAt: Date.now() + 2000
     }).then(
       () => null,
       (err) => err
     );
 
     assert.ok(error, 'should reject');
-    assert.match(error.message, /exceeded 2000ms/);
+    assert.match(error.message, /Timed out after 2000ms/);
     assert.equal(error.status, 504, 'a deadline is our timeout, not the target');
     assert.equal(liveBrowserCount(), 0);
 
@@ -114,7 +118,10 @@ describe('browser lifecycle', { concurrency: 1 }, () => {
 
   test('closeAllBrowsers reaps sessions that are still running', async () => {
     // Start a job and deliberately do not await it.
-    const pending = fetchWithBrowser(`${baseUrl}/hang`, { timeout: 60_000 }).catch(
+    const pending = fetchWithBrowser(`${baseUrl}/hang`, {
+      timeout: 60_000,
+      deadlineAt: Date.now() + 120_000
+    }).catch(
       () => 'rejected'
     );
 
