@@ -1,5 +1,21 @@
+import { fetch, ProxyAgent } from 'undici';
 import { getRandomProxy } from '../lib/proxies.js';
 import { getRandomUserAgent } from '../lib/userAgent.js';
+
+/**
+ * One ProxyAgent per proxy, reused across requests.
+ *
+ * A fresh agent per request opens a fresh connection pool per request, which
+ * throws away keep-alive and leaks sockets under load.
+ */
+const agents = new Map();
+
+const agentFor = (proxy) => {
+  if (!agents.has(proxy)) {
+    agents.set(proxy, new ProxyAgent(proxy));
+  }
+  return agents.get(proxy);
+};
 
 /**
  * Fetches a URL without a browser.
@@ -7,6 +23,11 @@ import { getRandomUserAgent } from '../lib/userAgent.js';
  * This is the path most requests should take: it is roughly a hundred times
  * cheaper than launching a browser and works on any site that renders its
  * content server-side.
+ *
+ * Uses undici's fetch rather than the global one. Node's built-in fetch bundles
+ * its own copy of undici, and handing it a dispatcher built by the standalone
+ * package fails with "invalid onRequestStart method". Taking both fetch and
+ * ProxyAgent from the same package keeps them in step.
  *
  * @param {string} url
  * @param {Object} [options]
@@ -17,14 +38,8 @@ export const fetchPlain = async (url, { timeout = 30_000 } = {}) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
 
-  // Node's fetch has no proxy option. A configured proxy needs an agent via
-  // undici's ProxyAgent, which is only wired up when a pool exists.
+  // Node's fetch has no proxy option, so a proxy has to arrive as a dispatcher.
   const proxy = getRandomProxy();
-  let dispatcher;
-  if (proxy) {
-    const { ProxyAgent } = await import('undici');
-    dispatcher = new ProxyAgent(proxy);
-  }
 
   try {
     const response = await fetch(url, {
@@ -35,7 +50,7 @@ export const fetchPlain = async (url, { timeout = 30_000 } = {}) => {
       },
       redirect: 'follow',
       signal: controller.signal,
-      ...(dispatcher ? { dispatcher } : {})
+      ...(proxy ? { dispatcher: agentFor(proxy) } : {})
     });
 
     const html = await response.text();
@@ -48,13 +63,25 @@ export const fetchPlain = async (url, { timeout = 30_000 } = {}) => {
 
     return { html, status: response.status, finalUrl: response.url };
   } catch (error) {
-    if (error.name === 'AbortError') {
+    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
       const timeoutError = new Error(`Timed out after ${timeout}ms`);
       timeoutError.status = 504;
       throw timeoutError;
+    }
+    // undici wraps connection failures; the cause carries the useful detail.
+    if (error.cause?.code) {
+      const wrapped = new Error(`${error.message} (${error.cause.code})`);
+      wrapped.status = error.status;
+      throw wrapped;
     }
     throw error;
   } finally {
     clearTimeout(timer);
   }
+};
+
+/** Closes pooled proxy agents. Called on shutdown. */
+export const closeProxyAgents = async () => {
+  await Promise.allSettled([...agents.values()].map((agent) => agent.close()));
+  agents.clear();
 };
