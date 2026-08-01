@@ -4,7 +4,7 @@ An HTTP API that fetches a page and gives you the HTML. Each request goes throug
 one of two engines: a plain HTTP fetch, or a stealth browser for pages that only
 exist after JavaScript runs.
 
-**Status:** working, rewritten 2026 · Node 20+
+**Status:** working · Node 20+
 
 The point is that you pick per request. A plain fetch is roughly a hundred times
 cheaper than a browser, and most pages do not need one, so paying browser costs
@@ -215,8 +215,8 @@ caller asked for.
 ### Why the budget spans the queue
 
 A per-job timeout starts when a job begins running, so it cannot see time spent
-waiting. With one slot busy, a caller asking for 8 seconds used to sit behind a
-60 second job and get an "8 second timeout" error 55 seconds later, which is
+waiting. With one slot busy, a caller asking for 8 seconds would sit behind a 60
+second job and receive an "8 second timeout" error 55 seconds later, which is
 worse than useless.
 
 The budget is enforced from arrival instead. A queued job whose budget expires is
