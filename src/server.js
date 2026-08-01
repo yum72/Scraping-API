@@ -1,5 +1,3 @@
-import { buildApp } from './app.js';
-
 const apiKey = process.env.API_KEY;
 
 // Refuse to start without a key rather than falling back to a default. The
@@ -9,6 +7,18 @@ if (!apiKey) {
   console.error('API_KEY is not set. Refusing to start.');
   console.error('Set it in the environment, for example:');
   console.error('  API_KEY=$(openssl rand -hex 24) npm start');
+  process.exit(1);
+}
+
+// Imported dynamically so a bad PROXIES_FILE reports as one clear line rather
+// than a module-load stack trace. The proxy pool is read at import time, which
+// is deliberate: a list that cannot be read should stop the server, not be
+// discovered on the first request.
+let buildApp;
+try {
+  ({ buildApp } = await import('./app.js'));
+} catch (error) {
+  console.error(`${error.message}. Refusing to start.`);
   process.exit(1);
 }
 
