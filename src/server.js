@@ -25,9 +25,16 @@ try {
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? '0.0.0.0';
 const maxConcurrent = Number(process.env.MAX_CONCURRENT_BROWSERS ?? 15);
-const queueTimeout = Number(process.env.BROWSER_JOB_TIMEOUT_MS ?? 180_000);
+const defaultMaxTimeout = Number(process.env.DEFAULT_TIMEOUT_MS ?? 120_000);
+const systemMaxTimeout = Number(process.env.MAX_TIMEOUT_MS ?? 300_000);
 
-const app = buildApp({ apiKey, maxConcurrent, queueTimeout, logger: true });
+const app = buildApp({
+  apiKey,
+  maxConcurrent,
+  defaultMaxTimeout,
+  systemMaxTimeout,
+  logger: true
+});
 
 let shuttingDown = false;
 

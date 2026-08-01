@@ -31,12 +31,27 @@ const agentFor = (proxy) => {
  *
  * @param {string} url
  * @param {Object} [options]
- * @param {number} [options.timeout=30000] - Milliseconds before aborting.
+ * @param {number} [options.deadlineAt] - Absolute epoch ms by which this must
+ *   be done. The same budget the browser path uses, so both engines honour one
+ *   number rather than each having its own idea of a timeout.
+ * @param {number} [options.budget] - Size of that budget, for error messages.
+ * @param {number} [options.timeout] - Per-request timeout, clamped to whatever
+ *   is left of the budget.
  * @returns {Promise<{ html: string, status: number, finalUrl: string }>}
  */
-export const fetchPlain = async (url, { timeout = 30_000 } = {}) => {
+export const fetchPlain = async (url, { deadlineAt, budget, timeout } = {}) => {
+  const deadline = deadlineAt ?? Date.now() + 30_000;
+  const remaining = deadline - Date.now();
+
+  if (remaining <= 0) {
+    const error = new Error(`Timed out after ${budget ?? 'the configured'}ms`);
+    error.status = 504;
+    throw error;
+  }
+
+  const effective = Math.max(1_000, Math.min(timeout ?? remaining, remaining));
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
+  const timer = setTimeout(() => controller.abort(), effective);
 
   // Node's fetch has no proxy option, so a proxy has to arrive as a dispatcher.
   const proxy = getRandomProxy();
@@ -64,7 +79,7 @@ export const fetchPlain = async (url, { timeout = 30_000 } = {}) => {
     return { html, status: response.status, finalUrl: response.url };
   } catch (error) {
     if (error.name === 'AbortError' || error.name === 'TimeoutError') {
-      const timeoutError = new Error(`Timed out after ${timeout}ms`);
+      const timeoutError = new Error(`Timed out after ${budget ?? effective}ms`);
       timeoutError.status = 504;
       throw timeoutError;
     }

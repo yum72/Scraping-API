@@ -129,30 +129,47 @@ const startSession = async ({ proxy, launchTimeout = 60_000 } = {}) => {
  *
  * @param {string} url
  * @param {Object} [options]
- * @param {number} [options.timeout=55000] - Milliseconds for navigation.
+ * @param {number} [options.deadlineAt] - Absolute epoch ms by which this must
+ *   be done. Set once when the request arrives, so it also covers time spent
+ *   waiting in the queue.
+ * @param {number} [options.budget] - Size of that budget, for error messages.
+ * @param {number} [options.timeout] - Navigation timeout. Clamped to whatever
+ *   is left of the budget; defaults to the whole remainder.
  * @param {number} [options.settleMs=1500] - Quiet period after load, for
  *   client-rendered pages that fill in content after the network goes idle.
- * @param {number} [options.hardTimeout] - Ceiling on the whole job. Defaults to
- *   navigation plus settle plus headroom for teardown.
  * @returns {Promise<{ html: string, status: number, finalUrl: string }>}
  */
 export const fetchWithBrowser = async (
   url,
-  { timeout = 55_000, settleMs = 1_500, hardTimeout } = {}
+  { deadlineAt, budget, timeout, settleMs = 1_500 } = {}
 ) => {
-  const proxy = getRandomProxy();
-  const session = await startSession({ proxy });
+  const deadline = deadlineAt ?? Date.now() + 120_000;
+  const remainingAtStart = deadline - Date.now();
 
-  // A ceiling on the whole job, not just navigation. page.goto has its own
-  // timeout, but a page can pass navigation and then wedge in content() or
-  // during teardown, and those have no timeout of their own.
-  const jobDeadline = hardTimeout ?? timeout + settleMs + 15_000;
+  // Already out of time before doing anything, which happens when a job has
+  // been sitting in the queue. Fail here rather than spending 40 seconds
+  // launching a browser for a caller who has stopped waiting.
+  if (remainingAtStart <= 0) {
+    const error = new Error(
+      `Timed out after ${budget ?? 'the configured'}ms, waiting in the queue`
+    );
+    error.status = 504;
+    throw error;
+  }
+
+  const proxy = getRandomProxy();
+  const session = await startSession({ proxy, launchTimeout: remainingAtStart });
 
   const work = async () => {
     const page = await session.browser.newPage();
 
+    // Navigation never gets more than the budget has left, so a generous
+    // per-request timeout cannot outlive the deadline the caller asked for.
+    const remaining = deadline - Date.now();
+    const navigationTimeout = Math.max(1_000, Math.min(timeout ?? remaining, remaining));
+
     const response = await page.goto(url, {
-      timeout,
+      timeout: navigationTimeout,
       waitUntil: 'domcontentloaded'
     });
 
@@ -179,7 +196,10 @@ export const fetchWithBrowser = async (
   try {
     return await Promise.race([
       work(),
-      rejectAfter(jobDeadline, `Browser job exceeded ${jobDeadline}ms`).catch((error) => {
+      rejectAfter(
+        Math.max(1, deadline - Date.now()),
+        `Timed out after ${budget ?? deadline - Date.now()}ms`
+      ).catch((error) => {
         // Racing alone does not stop the work; the pending page calls would sit
         // there holding a Chromium process open. Killing it makes them reject.
         session.kill();
