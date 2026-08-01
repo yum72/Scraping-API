@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test test/app.test.js",
+    "test": "node --test test/app.test.js test/timeout.test.js",
     "test:browser": "node --test --test-concurrency=1 test/browser.test.js",
     "test:all": "npm test && npm run test:browser"
   },
